@@ -5,18 +5,17 @@
     "dependencies": {
         "@hiogawa/vite-plugin-fullstack": "^0.0.11",
         "@withsprinkles/content-layer": "^0.1.0",
-        "remix": "3.0.0-alpha.4"
+        "remix": "3.0.0-alpha.5"
     },
     "devDependencies": {
         "@cloudflare/vite-plugin": "^1.28.0",
         "@mdx-js/rollup": "^3.1.1",
         "@types/node": "^25.5.0",
-        "@typescript/native-preview": "7.0.0-dev.20260315.1",
+        "@typescript/native-preview": "latest",
         "eslint-plugin-perfectionist": "^5.6.0",
-        "oxc-parser": "^0.121.0",
+        "oxc-parser": "^0.127.0",
         "vite": "npm:@voidzero-dev/vite-plus-core@^0.1.14",
         "vite-plus": "^0.1.14",
-        "vitest": "npm:@voidzero-dev/vite-plus-test@^0.1.14",
         "wrangler": "^4.73.0"
     },
     "packageManager": "pnpm@10.33.0",
@@ -27,8 +26,7 @@
             "workerd"
         ],
         "overrides": {
-            "vite": "npm:@voidzero-dev/vite-plus-core@latest",
-            "vitest": "npm:@voidzero-dev/vite-plus-test@latest"
+            "vite": "npm:@voidzero-dev/vite-plus-core@latest"
         }
     }
 }
