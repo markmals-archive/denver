@@ -36,6 +36,9 @@ importers:
       eslint-plugin-perfectionist:
         specifier: ^5.6.0
         version: 5.9.0(eslint@10.2.1)(typescript@6.0.3)
+      magic-string:
+        specifier: ^0.30.21
+        version: 0.30.21
       oxc-parser:
         specifier: ^0.127.0
         version: 0.127.0

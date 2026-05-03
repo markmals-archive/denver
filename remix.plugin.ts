@@ -2,20 +2,10 @@ import type { Program } from "oxc-parser";
 import type { PluginOption } from "vite-plus";
 
 import fullstack from "@hiogawa/vite-plugin-fullstack";
+import MagicString from "magic-string";
 import { parseSync } from "oxc-parser";
 
 const CLIENT_ENTRY_PATTERN = /\bclientEntry\b/;
-
-// Rolldown may provide ast and magicString on the transform hook meta at build time,
-// but they are not available during dev.
-interface RolldownTransformMeta {
-    ast: Program;
-    magicString: {
-        [key: string]: unknown;
-        prepend(str: string): void;
-        overwrite(start: number, end: number, content: string): void;
-    };
-}
 
 export function remix({
     clientEntry = "app/entry.browser",
@@ -36,6 +26,42 @@ export function remix({
             serverEnvironments: _environments,
             serverHandler,
         }),
+        {
+            // Patches the builder so remix-build coexists with plugins that also
+            // orchestrate builds (e.g. @cloudflare/vite-plugin). Runs at "pre"
+            // order so the guards are in place before any building starts.
+            name: "remix-build:compat",
+            buildApp: {
+                order: "pre" as const,
+                async handler(builder) {
+                    // Guard builder.build() against redundant calls. Without this,
+                    // both remix-build and config.builder.buildApp (Cloudflare) would
+                    // each trigger a full build of every environment.
+                    let originalBuild = builder.build.bind(builder);
+                    builder.build = (async environment => {
+                        if ("isBuilt" in environment && environment.isBuilt) return;
+                        return originalBuild(environment);
+                    }) as typeof builder.build;
+
+                    // @cloudflare/vite-plugin moves SSR assets into client output
+                    // before fullstack's writeAssetsManifest copies them, causing
+                    // ENOENT on files that were already relocated. Safe to ignore.
+                    if (
+                        "writeAssetsManifest" in builder &&
+                        typeof builder.writeAssetsManifest === "function"
+                    ) {
+                        let originalWrite = builder.writeAssetsManifest.bind(builder);
+                        builder.writeAssetsManifest = async () => {
+                            try {
+                                await originalWrite();
+                            } catch (error) {
+                                if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+                            }
+                        };
+                    }
+                },
+            },
+        },
         {
             name: "remix-build",
             async buildApp(builder) {
@@ -76,14 +102,19 @@ export function remix({
             name: "remix-preview-server",
             async configurePreviewServer(server) {
                 let ssrOutDir = server.config.environments.ssr?.build?.outDir ?? "dist/ssr";
-                let entryPath = new URL(
-                    `${ssrOutDir}/index.js`,
-                    `file://${server.config.root}/`,
-                ).href;
+                let entryPath = new URL(`${ssrOutDir}/index.js`, `file://${server.config.root}/`)
+                    .href;
 
-                let mod = await import(/* @vite-ignore */ entryPath);
+                let mod;
+                try {
+                    mod = await import(/* @vite-ignore */ entryPath);
+                } catch {
+                    // SSR bundle targets a non-Node runtime (e.g. Cloudflare Workers)
+                    // that provides its own preview server. Skip.
+                    return;
+                }
+
                 let router = mod.default ?? mod.router;
-
                 let { createRequestListener } = await import("remix/node-fetch-server");
 
                 return () => {
@@ -117,54 +148,42 @@ export function remix({
                         include: CLIENT_ENTRY_PATTERN,
                     },
                 },
-                handler(code, id, _meta) {
+                handler(code, id) {
                     if (!code.includes("import.meta.url")) return;
-
-                    let meta = _meta as unknown as Partial<RolldownTransformMeta> | undefined;
-                    let ast = meta?.ast ?? parseSync(id, code).program;
+                    let ast = parseSync(id, code).program;
 
                     let calls = findClientEntryCalls(ast);
                     if (calls.length === 0) return;
 
+                    let ms = new MagicString(code);
                     let isServer = environments.has(this.environment.name);
 
                     if (isServer) {
                         // Server: import ?assets=client to get the resolved client entry URL
-                        let prepend = `import ___clientEntryAssets from "${id}?assets=client";\n`;
-
-                        if (meta?.magicString) {
-                            let { magicString } = meta;
-                            magicString.prepend(prepend);
-                            for (let call of calls) {
-                                magicString.overwrite(
-                                    call.metaUrlStart,
-                                    call.metaUrlEnd,
-                                    `___clientEntryAssets.entry + "#${call.exportName}"`,
-                                );
-                            }
-                            return { code: magicString as unknown as string };
+                        ms.prepend(`import ___clientEntryAssets from "${id}?assets=client";\n`);
+                        for (let call of calls) {
+                            ms.overwrite(
+                                call.metaUrlStart,
+                                call.metaUrlEnd,
+                                `___clientEntryAssets.entry + "#${call.exportName}"`,
+                            );
                         }
-
-                        let result = code;
-                        for (let call of [...calls].reverse()) {
-                            result =
-                                result.slice(0, call.metaUrlStart) +
-                                `___clientEntryAssets.entry + "#${call.exportName}"` +
-                                result.slice(call.metaUrlEnd);
+                    } else {
+                        // Client: import.meta.url already resolves to the chunk URL.
+                        // Just append #ExportName so clientEntry gets the required fragment.
+                        for (let call of calls) {
+                            ms.overwrite(
+                                call.metaUrlStart,
+                                call.metaUrlEnd,
+                                `import.meta.url + "#${call.exportName}"`,
+                            );
                         }
-                        return prepend + result;
                     }
 
-                    // Client: import.meta.url already resolves to the chunk URL.
-                    // Just append #ExportName so clientEntry gets the required fragment.
-                    let result = code;
-                    for (let call of [...calls].reverse()) {
-                        result =
-                            result.slice(0, call.metaUrlStart) +
-                            `import.meta.url + "#${call.exportName}"` +
-                            result.slice(call.metaUrlEnd);
-                    }
-                    return result;
+                    return {
+                        code: ms.toString(),
+                        map: ms.generateMap({ hires: "boundary", source: id }),
+                    };
                 },
             },
         },
